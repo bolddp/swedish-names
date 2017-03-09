@@ -1,6 +1,8 @@
 var http = require('http');
 var fs = require('fs');
 
+const nameRegex = /(.*)([K|M])/
+
 // Get the API method description
 http.get('http://api.scb.se/OV0104/v1/doris/sv/ssd/BE/BE0001/BE0001TNamn10', (response) => {
   let body = '';
@@ -14,11 +16,42 @@ http.get('http://api.scb.se/OV0104/v1/doris/sv/ssd/BE/BE0001/BE0001TNamn10', (re
   });
 });
 
-function processGetResponse(queryValues) {
-  // Construct the post data to send to the API
+function processGetResponse(getResponseValues) {
+  // We start by finding the duplicates, since we need to send a
+  // query to get the name counts for them.
+  const maleMap = {};
+  const femaleNames = [];
+  getResponseValues.forEach(x => {
+    const match = nameRegex.exec(x);
+    if (match) {
+      const name = match[1];
+      const gender = match[2];
+      if (gender === 'M') {
+        maleMap[name] = true;
+      } else {
+        femaleNames.push(name);
+      }
+    }
+  });
+
+  const duplicateNames = [];
+  const duplicateMap = {};
+  const postQueryValues = [];
+  femaleNames.forEach(x => {
+    if (maleMap[x]) {
+      duplicateNames.push(x);
+      duplicateMap[x] = true;
+
+      postQueryValues.push(`${x}K`);
+      postQueryValues.push(`${x}M`);
+    }
+  });
+
+  writeNamesToFile(duplicateNames, 'duplicate_names.json');
+
   const postData = JSON.stringify({   
 	  query: [
-      { code: "Tilltalsnamn", selection: { filter: "item", values: queryValues } },
+      { code: "Tilltalsnamn", selection: { filter: "item", values: postQueryValues } },
       { code: "Tid", selection: { filter: "item", values: [ "2016" ] } }
     ],
     response: { format: "json" } 
@@ -46,28 +79,20 @@ function processGetResponse(queryValues) {
       response.on('end', () => {
         console.log('POST finished');
         const data = JSON.parse(body.substring(1));
-        processPostResponse(data);
+        processPostResponse(getResponseValues, data);
       });
     }
   );
 
-  postRequest.on('socket', function (socket) {
-    socket.setTimeout(60000);  
-    socket.on('timeout', function() {
-        req.abort();
-    });
-  });
-
   postRequest.write(postData);
   postRequest.end();
-}
+};
 
-function processPostResponse(data) {
+function processPostResponse(getResponseValues, postResponse) {
   console.log('Processing POST data');
   const nameRegex = /(.*)([K|M])/
-  const allNames = [];
   const nameStats = {};
-  data.data.forEach(x => {
+  postResponse.data.forEach(x => {
     const match = nameRegex.exec(x.key[0]);
     if (match) {
       const name = match[1];
@@ -76,7 +101,6 @@ function processPostResponse(data) {
       if (nameStats[name]) {
         nameStats[name][gender] = count;
       } else {
-        allNames.push(name);
         nameStats[name] = {
           [gender]: count
         } 
@@ -84,109 +108,53 @@ function processPostResponse(data) {
     }
   });
 
-  console.log('Finalizing...');
-
-  // Finally put it all together
-  const allFemaleNames = [];
-  const allMaleNames = [];
+  // Now we have a map with female and male name counts for all duplicates
   const femaleNames = [];
+  const femaleNamesWithDuplicates = [];
   const maleNames = [];
-  
-  allNames.forEach(x => {
-    const nameStat = nameStats[x];
+  const maleNamesWithDuplicates = [];
 
-    if (nameStat.K && nameStat.M) {
-      if (nameStat.K > nameStat.M) {
-        femaleNames.push(x);
-      } else {
-        maleNames.push(x);
+  getResponseValues.forEach(x => {
+    const match = nameRegex.exec(x);
+    if (match) {
+      const name = match[1];
+      let gender = match[2];
+      // Push it to lists with duplicates without further analysis
+      if (gender === 'M') {
+        maleNamesWithDuplicates.push(name);
+      } else if (gender === 'K') {
+        femaleNamesWithDuplicates.push(name);
       }
-    }
-    else {
-      if (nameStat.K) {
-        femaleNames.push(x);
-      } else {
-        maleNames.push(x);
-      }
-    }
 
-    if (nameStat.K) {
-      allFemaleNames.push(x);
-    }
-    if (nameStat.M) {
-      allMaleNames.push(x);
+      // Is it a duplicate? Then should it be pushed?
+      if (nameStats[name]) {
+        const nameStat = nameStats[name];
+        // Should it be ignored?
+        if (gender === 'K') {
+          if (nameStat.K <= nameStat.M) {
+            gender = '';
+          }
+        } else {
+          if (nameStat.K > nameStat.M) {
+            gender = '';
+          }
+        }
+      }
+
+      if (gender === 'M') {
+        maleNames.push(name);
+      }
+      if (gender === 'K') {
+        femaleNames.push(name);
+      }
     }
   });
 
-  writeNamesToFile(allFemaleNames, 'swedish_female_names_with_duplicates.json');
-  writeNamesToFile(allMaleNames, 'swedish_male_names_with_duplicates.json');
   writeNamesToFile(femaleNames, 'swedish_female_names.json');
+  writeNamesToFile(femaleNamesWithDuplicates, 'swedish_female_names_with_duplicates.json');
   writeNamesToFile(maleNames, 'swedish_male_names.json');
+  writeNamesToFile(maleNamesWithDuplicates, 'swedish_male_names_with_duplicates.json');
 }
-
-/** Processes the response from the GET operation, which is
- * basically the API method description.
- */
-// function processGetResponse(data) {
-//   const nameRegex = /(.*)([K|M])/
-//   const nameValues = data.variables[0].values;
-
-//   const maleNames = [];
-//   const femaleNames = [];
-//   const maleMap = {};
-//   nameValues.forEach(x => {
-//     const match = nameRegex.exec(x);
-
-//     if (match) {
-//       const name = match[1];
-//       const gender = match[2];
-//       if (gender === 'K') {
-//         femaleNames.push(name);
-//       } else {
-//         maleNames.push(name);
-//         maleMap[name] = true;
-//       }
-//     }
-//   });
-
-//   writeNamesToFile(maleNames, 'swedish_male_names_with_duplicates.json');
-//   writeNamesToFile(femaleNames, 'swedish_female_names_with_duplicates.json');
-
-//   // Determine and write duplicates
-//   const duplicateNames = [];
-//   const queryValues = [];
-//   femaleNames.forEach(x => {
-//     if (maleMap[x]) {
-//       duplicateNames.push(x);
-//       queryValues.push(x + "K");
-//       queryValues.push(x + "M");
-//     }
-//   });
-//   writeNamesToFile(duplicateNames, 'duplicate_names.json');
-
-//   // Construct a query to check the popularity of each name within its gender
-//   const queryBody = {   
-// 	  query: [
-//       { code: "Tilltalsnamn", selection: { filter: "item", values: queryValues } },
-//       { code: "Tid", selection: { filter: "item", values: [ "2016" ] } }
-//     ],
-//     response: { format: "json" } 
-//   };
-
-//   http.request({
-//       host: 'http://api.scb.se/OV0104/v1/doris/sv/ssd/BE/BE0001/BE0001TNamn10',
-//       method: 'POST'
-//     }, (response) => {
-//     let body = '';
-//     response.on('data', x => {
-//       body += x;
-//     });
-//     response.on('end', () => {
-//       const data = JSON.parse(body);
-//       processDuplicateNamesResponse(maleNames, femaleNames, data);
-//     });
-//   });
-// };
 
 /** Writes a string array of names to a JSON file. */
 function writeNamesToFile(names, fileName) {
